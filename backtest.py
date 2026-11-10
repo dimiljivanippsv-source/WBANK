@@ -55,25 +55,24 @@ def gen_signals(args):
     return sym, out
 
 
-def simulate(df: pd.DataFrame, sg: dict, tp_r: float, hold: int):
-    """Returns (entry_t, exit_t, net_return_fraction, risk_fraction, r_multiple) or None."""
+def simulate(arr, sg: dict, tp_r: float, hold: int):
+    """arr = dict of numpy arrays for the symbol. Returns (entry_t, exit_t, net_ret, risk_frac) or None."""
     j = sg["i"] + 1
-    entry = df["open"].iloc[j]
+    entry = arr["open"][j]
     risk = entry - sg["stop"]
     if risk <= 0 or risk / entry > 0.08:
         return None
     tp = entry + tp_r * risk
-    exit_p, exit_j = None, min(j + hold, len(df) - 1)
-    for k in range(j, min(j + hold, len(df) - 1) + 1):
-        lo, hi, op = df["low"].iloc[k], df["high"].iloc[k], df["open"].iloc[k]
-        if lo <= sg["stop"]:
-            exit_p, exit_j = min(op, sg["stop"]), k; break
-        if hi >= tp:
+    last = min(j + hold, len(arr["close"]) - 1)
+    exit_p, exit_j = None, last
+    for k in range(j, last + 1):
+        if arr["low"][k] <= sg["stop"]:
+            exit_p, exit_j = min(arr["open"][k], sg["stop"]), k; break
+        if arr["high"][k] >= tp:
             exit_p, exit_j = tp, k; break
     if exit_p is None:
-        exit_p = df["close"].iloc[exit_j]
-    ret = (exit_p - entry) / entry - COST
-    return int(df["t"].iloc[j]), int(df["close_t"].iloc[exit_j]), ret, risk / entry
+        exit_p = arr["close"][exit_j]
+    return int(arr["t"][j]), int(arr["close_t"][exit_j]), (exit_p - entry) / entry - COST, risk / entry
 
 
 def portfolio(trades, risk_frac=0.01, max_open=5, start=1.0):
@@ -94,7 +93,7 @@ def portfolio(trades, risk_frac=0.01, max_open=5, start=1.0):
 
 def stats(start, ev, n_days):
     if not ev:
-        return dict(trades=0, tot=0, daily=0, dd=0, hit2=0, wr=0)
+        return dict(trades=0, tot=0, daily=0, dd=0, hit2=0, worst=0, best=0)
     s = pd.Series([e for _, e in ev], index=pd.to_datetime([t for t, _ in ev], unit="ms"))
     daily = s.resample("1D").last().ffill()
     daily = pd.concat([pd.Series([start]), daily]).pct_change().dropna()
@@ -130,15 +129,14 @@ def main():
     bh = np.mean([d["close"].iloc[-1] / d["close"].iloc[0] - 1 for d in data.values()])
     print(f"period {days:.0f} days; equal-weight buy&hold of these coins: {bh:+.1%}\n")
 
+    arrs = {k: {c: d[c].to_numpy() for c in ("open", "high", "low", "close", "t", "close_t")} for k, d in data.items()}
+    sim = {(tpr, hold): [simulate(arrs[x["sym"]], x, tpr, hold) for x in allsig] for tpr in (1, 2, 3) for hold in (24, 72)}
+    print("simulated exits", flush=True)
     grid = itertools.product(["ALL", "BREAKOUT", "PULLBACK", "REVERSAL"], [50, 60, 70], [1, 2, 3], [24, 72], [False, True])
     rows = []
     for setup, minsc, tpr, hold, uponly in grid:
-        sel = [s for s in allsig if (setup == "ALL" or s["setup"] == setup) and s["score"] >= minsc and (not uponly or s["trend"] == "UP")]
-        tr = []
-        for s in sel:
-            r = simulate(data[s["sym"]], s, tpr, hold)
-            if r:
-                tr.append((*r[:4], s["sym"]))
+        tr = [(*r, s["sym"]) for s, r in zip(allsig, sim[(tpr, hold)])
+              if r and (setup == "ALL" or s["setup"] == setup) and s["score"] >= minsc and (not uponly or s["trend"] == "UP")]
         for name, sub in (("IS", [x for x in tr if x[0] < split]), ("OOS", [x for x in tr if x[0] >= split])):
             st0, ev = portfolio(sub)
             nd = (split - t0) / 86_400_000 if name == "IS" else (t1 - split) / 86_400_000
